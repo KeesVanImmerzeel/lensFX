@@ -1,0 +1,13 @@
+name: lensFX
+title: lensFX
+username: sweco
+account: sweco
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 17025888
+bundleId: 11815072
+url: https://sweco.shinyapps.io/lensFX/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: doc/formularium neerslaglenzen model.jpg|doc/schema neerslaglenzen model.jpg|doc/symbolen neerslaglenzen model.jpg|doc/Waterbalansmodel documentatie mei 1994.docx|doc/Waterbalansmodel documentatie mei 1994.pdf
