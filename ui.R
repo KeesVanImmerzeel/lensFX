@@ -111,7 +111,6 @@ fluidPage(
                   format = "dd-mm-yyyy", language = "nl"),
         dateInput("stats_to", "Statistieken tot:", value = NULL,
                   format = "dd-mm-yyyy", language = "nl"),        
-        #actionButton("compute_stats", "Compute statistics", class = "btn-primary"),
         tableOutput("stats_table")
       ),
       tableOutput("view_results_table"),
@@ -145,7 +144,7 @@ fluidPage(
              )), 
     tabPanel(title = "Documentation",
              tabsetPanel(
-               tabPanel(title = "schematic Diagram", tags$div(
+               tabPanel(title = "Schematic Diagram", tags$div(
                  img(src = "schema neerslaglenzen model.png", width =
                        "600px")
                )),
@@ -158,10 +157,17 @@ fluidPage(
                        "600px")
                )),
                tabPanel(
-                 title = "Technical Report",
-                 tags$iframe(style = "height:800px; width:100%;", src = "Waterbalansmodel documentatie mei 1994.pdf")
-                 
-               ),
+                 title = "Technical background",
+                 tags$ul(tags$li(
+                   tags$a(
+                     href = "Waterbalansmodel documentatie mei 1994.pdf",
+                     "Technische documentatie neerslaglenzen model(PDF)",
+                     target = "_blank"
+                   )
+                 ), tags$li(
+                   tags$a(href = "https://github.com/KeesVanImmerzeel/lensFX", "lensFX op GitHub")
+                 ))
+               ), 
                tabPanel(
                  title = "Articles",
                  

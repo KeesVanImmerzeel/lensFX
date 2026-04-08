@@ -1217,15 +1217,20 @@ server <- function(input, output, session) {
   
   output$download_stats_excel <- downloadHandler(
     filename = function() {
-      paste0("statistics_", Sys.Date(), ".xlsx")
+      req(input$stats_from, input$stats_to)
+      
+      from <- format(as.Date(input$stats_from), "%Y%m%d")
+      to   <- format(as.Date(input$stats_to), "%Y%m%d")
+      
+      paste0("statistics_", from, "_to_", to, ".xlsx")
     },
     content = function(path) {
-      
       stats <- stats_reactive()
       req(stats)
       
       writexl::write_xlsx(stats, path)
     }
   )
+  
     
 }
