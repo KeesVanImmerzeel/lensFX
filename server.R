@@ -3,6 +3,8 @@ library(readxl)
 library(dplyr)
 library(deSolve)
 library(openxlsx)
+library(Rcpp)
+sourceCpp("src/lensFX.cpp")
 
 # This creates an empty but valid tibble → not NULL.
 # This avoids 100% of the .html problems.
@@ -16,17 +18,42 @@ library(openxlsx)
 stresses_global <- read_excel("www/default_stresses.xlsx")
 observations_global <- read_excel("www/default_observations.xlsx")
 
-
 # ------------------ Modelkern: getters & afgeleiden ---------------------------
 
-get_GWS <- function(A, B, Mv, PorFc, PorFr)  (A + B - Mv*PorFc) / PorFr
-get_GV  <- function(B, PorSat)               B / PorSat
-get_Kwel <- function(H1, GWS, c0)            (H1 - GWS) / c0
-get_Dr <- function(GWS, HSloot, Wdr)         pmax((GWS - HSloot) / Wdr, 0)
-get_DrB <- function(GV, GWS, Dr)             ifelse(GV < GWS, (GV/GWS)*Dr, Dr)
-get_DrA <- function(GWS, GV, Dr)             pmax((GWS - GV) * Dr / GWS, 0)
-get_OA <- function(GWS, Gr, Cklein)          ifelse(GWS < Gr, 0, (GWS - Gr)/Cklein)
-# Gr = greppelniveau (m+c0)
+get_GWS  <- function(A, B, Mv, PorFc, PorFr)
+  get_GWS_cpp(A, B, Mv, PorFc, PorFr)
+
+get_GV   <- function(B, PorSat)
+  get_GV_cpp(B, PorSat)
+
+get_Kwel <- function(H1, GWS, c0)
+  get_Kwel_cpp(H1, GWS, c0)
+
+get_Dr   <- function(GWS, HSloot, Wdr)
+  get_Dr_cpp(GWS, HSloot, Wdr)
+
+get_DrB  <- function(GV, GWS, Dr)
+  get_DrB_cpp(GV, GWS, Dr)
+
+get_DrA  <- function(GWS, GV, Dr)
+  get_DrA_cpp(GWS, GV, Dr)
+
+get_OA   <- function(GWS, Gr, Cklein)
+  get_OA_cpp(GWS, Gr, Cklein)
+
+#Gr = greppelniveau (m+c0)
+
+
+# R wrapper voor afgeleiden (SpeedProc) voor constante externe parameters binnen de tijdstap
+lens_derivs <- function(t, y, pars) {
+  res <- lens_derivs_cpp(t, y, pars)
+  list(res$dy)
+}
+
+# R wrapper voor Correctiestap (na elke hoofd-tijdstap), identiek aan Delphi Correct()
+correct_state <- function(A, B, state_aux, pars) {
+  correct_state_cpp(A, B, state_aux, pars)
+}
 
 # dynamische externe parameters per tijdstap met offsets en wrapping
 step_external <- function(ext_df, step_index, dH1=0, dHSloot=0, dNN=0) {
@@ -39,238 +66,42 @@ step_external <- function(ext_df, step_index, dH1=0, dHSloot=0, dNN=0) {
   )
 }
 
-# Afgeleiden (SpeedProc) voor constante externe parameters binnen de tijdstap
-lens_derivs <- function(t, y, pars) {
-  # y: c(A, B, NNcum, OAcum, DrAcum, Kwelcum, DrBcum)
-  A <- y[1]; B <- y[2]
-  NNcum <- y[3]; OAcum <- y[4]; DrAcum <- y[5]; Kwelcum <- y[6]; DrBcum <- y[7]
-  
-  # Externe parameters (constant binnen deze tijdstap)
-  H1     <- pars$H1
-  HSloot <- pars$HSloot
-  NN     <- pars$NN
-  
-  # Parameters
-  PorSat <- pars$PorSat; PorFr <- pars$PorFr; PorFc <- pars$PorFc
-  Mv <- pars$Mv; c0 <- pars$c0; Wdr <- pars$Wdr; Cklein <- pars$Cklein; Gr <- pars$Gr
-  
-  # Afgeleide grootheden
-  GWS  <- get_GWS(A,B,Mv,PorFc,PorFr)
-  GV   <- get_GV(B, PorSat)
-  Kwel <- get_Kwel(H1, GWS, c0)
-  Dr   <- get_Dr(GWS, HSloot, Wdr)
-  DrB  <- get_DrB(GV, GWS, Dr)
-  DrA  <- get_DrA(GWS, GV, Dr)
-  OA   <- get_OA(GWS, Gr, Cklein)
-  
-  delt <- NN - OA - DrA
-  dA <- delt
-  if ((delt < 0) && (A <= 0)) {
-    dA <- 0.0      # geen neg. vocht in lens
-    # 'delt' blijft negatief en wordt toegewezen aan dB (correctie)
-  } else {
-    delt <- 0      # anders wordt delt niet doorgegeven naar B
-  }
-  dB <- Kwel - DrB + delt
-  
-  dNNcum   <- NN
-  dOAcum   <- OA
-  dDrAcum  <- DrA
-  dKwelcum <- Kwel
-  dDrBcum  <- DrB
-  
-  list(c(dA, dB, dNNcum, dOAcum, dDrAcum, dKwelcum, dDrBcum),
-       c(GWS=GWS, GV=GV, Dr=Dr, OA=OA, Kwel=Kwel, H1=H1, HSloot=HSloot))
-}
-
-# Correctiestap (na elke hoofd-tijdstap), identiek aan Delphi Correct()
-correct_state <- function(A, B, state_aux, pars) {
-  # state_aux bevat: BA_cum, AB_cum, ErrCorr
-  BA_cum <- state_aux$BA_cum
-  AB_cum <- state_aux$AB_cum
-  ErrCorr <- state_aux$ErrCorr
-  
-  PorSat <- pars$PorSat; PorFr <- pars$PorFr; PorFc <- pars$PorFc
-  Mv <- pars$Mv
-  
-  GWS <- get_GWS(A,B,Mv,PorFc,PorFr)
-  
-  # 1) A >= Amin = PorFc * (Mv - GWS)
-  Amin <- PorFc * (Mv - GWS)
-  Corr <- A - Amin
-  if (Corr < 0) {
-    # over hevelen van B naar A
-    B  <- B + Corr
-    A  <- Amin
-    BA <- -Corr
-    BA_cum <- BA_cum + BA
-    if (BA_cum > Amin) BA_cum <- Amin
-  } else if (Corr > 0) {
-    if (Corr >= BA_cum) {
-      B <- B + BA_cum
-      A <- A - BA_cum
-      BA_cum <- 0
-    } else {
-      B <- B + Corr
-      A <- A - Corr
-      BA_cum <- BA_cum - Corr
-    }
-  }
-  
-  # 2) B >= 0 (grensvlak niet onder top c0)
-  Corr <- B
-  if (Corr < 0) {
-    A   <- A + Corr
-    B   <- 0
-    AB  <- -Corr
-    AB_cum <- AB_cum + AB
-  } else if (Corr > 0) {
-    B <- B - AB_cum
-    ErrCorr <- ErrCorr + AB_cum
-    if (B < 0) {
-      AB_cum  <- -B
-      B       <- 0
-      ErrCorr <- ErrCorr - AB_cum
-    } else {
-      AB_cum <- 0
-    }
-  }
-  
-  # Foutconditie zoals Delphi
-  GWS_new <- get_GWS(A,B,Mv,PorFc,PorFr)
-  if (GWS_new < 0) {
-    stop("Grondwaterstand onder basis watervoerend pakket. Model niet geschikt voor dit probleem (Delphi-gedrag).")
-  }
-  
-  list(A=A, B=B, BA_cum=BA_cum, AB_cum=AB_cum, ErrCorr=ErrCorr)
-}
-
 # Eén simulatie uitvoeren (baseline of scenario)
-simulate_lens <- function(inp, dH1=0, dHSloot=0, dNN=0,
-                          PorFr_override = NULL, c0_override=NULL,
-                          Wdr_override=NULL, Cklein_override=NULL, updateProgress = NULL) {
-  # Parameters
-  PorSat <- inp$PorSat
+simulate_lens <- function(inp,
+                          dH1 = 0,
+                          dHSloot = 0,
+                          dNN = 0,
+                          PorFr_override = NULL,
+                          c0_override = NULL,
+                          Wdr_override = NULL,
+                          Cklein_override = NULL,
+                          updateProgress = NULL) {   # <- KEEP THIS
+  
   PorFr  <- if (!is.null(PorFr_override)) PorFr_override else inp$PorFr
   c0     <- if (!is.null(c0_override))    c0_override    else inp$c0
   Wdr    <- if (!is.null(Wdr_override))   Wdr_override   else inp$Wdr
   Cklein <- if (!is.null(Cklein_override)) Cklein_override else inp$Cklein
-  PorFc  <- PorSat - PorFr
-  Mv     <- inp$Mv
-  Gr     <- inp$Gr
-  
-  # Initialen (zoals Delphi ResetIAandIB / Init)
-  IB <- inp$I_GV  * PorSat
-  IA <- inp$I_GWS * PorFr - IB + Mv * PorFc
-  
-  # y: [A, B, NNcum, OAcum, DrAcum, Kwelcum, DrBcum]
-  y <- c(A=IA, B=IB, NN_cum=0, OA_cum=0, DrA_cum=0, Kwel_cum=0, DrB_cum=0)
-  
-  # correctie-buffers (objectstatus niet in y)
-  BA_cum <- 0; AB_cum <- 0; ErrCorr <- 0
-  
-  # tijdstappen
-  dt  <- inp$TimeStepSize
-  n   <- floor(inp$TFinish / dt)
-  if (n <= 0) stop("Geen tijdstappen (TFinish / TimeStepSize <= 0).")
-  
-  # resultaten (zoals WriteStatus)
-  res <- tibble(
-    Tijd = numeric(0),
-    A = numeric(0), B = numeric(0), GWS = numeric(0), GV = numeric(0),
-    NN = numeric(0), OA = numeric(0), DrA = numeric(0), Kwel = numeric(0),
-    DrB = numeric(0), Dr = numeric(0), H1 = numeric(0), HSloo = numeric(0),
-    NN_cum = numeric(0), OA_cum = numeric(0), DrA_cum = numeric(0),
-    Kwel_cum = numeric(0), DrB_cum = numeric(0), Dr_cum = numeric(0),
-    ErrTot = numeric(0)
-  )
-  
-  
-  # Use the first stresses row at t = 0
-  ext0 <- step_external(inp$external, 1, dH1, dHSloot, dNN)
-  
-  H1     <- ext0$H1
-  HSloot <- ext0$HSloot
-  NN     <- ext0$NN
-  
-  GWS  <- get_GWS(y["A"], y["B"], Mv, PorFc, PorFr)
-  GV   <- get_GV(y["B"], PorSat)
-  Kwel <- get_Kwel(H1, GWS, c0)
-  Dr   <- get_Dr(GWS, HSloot, Wdr)
-  DrB  <- get_DrB(GV, GWS, Dr)
-  DrA  <- get_DrA(GWS, GV, Dr)
-  OA   <- get_OA(GWS, Gr, Cklein)
-  
-  res <- add_row(res,
-                 Tijd = 0,
-                 A = y["A"], B = y["B"], GWS = GWS, GV = GV,
-                 NN = NN, OA = OA, DrA = DrA, Kwel = Kwel,
-                 DrB = DrB, Dr = Dr, H1 = H1, HSloo = HSloot,
-                 NN_cum = 0, OA_cum = 0, DrA_cum = 0,
-                 Kwel_cum = 0, DrB_cum = 0, Dr_cum = 0,
-                 ErrTot = 0
-  )
-  
-  # Loop over hoofd-tijdstappen
-  for (i in 1:n) {
-    # Externe parameters voor deze stap
-    ext <- step_external(inp$external, i, dH1, dHSloot, dNN)
-    H1 <- ext$H1; HSloot <- ext$HSloot; NN <- ext$NN
-    
-    # parameters bundelen
-    pars <- list(PorSat=PorSat, PorFr=PorFr, PorFc=PorFc, Mv=Mv, Gr=Gr,
-                 c0=c0, Wdr=Wdr, Cklein=Cklein, H1=H1, HSloot=HSloot, NN=NN)
-    
-    # Integreer binnen [t, t+dt] met substeps (rk4)
-    times <- seq(0, dt, length.out = max(2, inp$I_nSubStep + 1))
-    out <- deSolve::ode(y=y, times=times, func=lens_derivs, parms=pars, method="rk4")
-    y_end <- as.numeric(out[nrow(out), 2:8]) # A,B,NNcum,OAcum,DrAcum,Kwelcum,DrBcum
-    names(y_end) <- names(y)
-    
-    # Correctiestap
-    corr <- correct_state(y_end["A"], y_end["B"],
-                          list(BA_cum=BA_cum, AB_cum=AB_cum, ErrCorr=ErrCorr), pars = c(pars, list()))
-    y_end["A"] <- corr$A
-    y_end["B"] <- corr$B
-    BA_cum <- corr$BA_cum
-    AB_cum <- corr$AB_cum
-    ErrCorr <- corr$ErrCorr
-    
-    # Ken hulpgrootheden toe op eind van stap (zoals WriteStatus bij TEnd)
-    GWS  <- get_GWS(y_end["A"], y_end["B"], Mv, PorFc, PorFr)
-    GV   <- get_GV(y_end["B"], PorSat)
-    Kwel <- get_Kwel(H1, GWS, c0)
-    Dr   <- get_Dr(GWS, HSloot, Wdr)
-    DrB  <- get_DrB(GV, GWS, Dr)
-    DrA  <- get_DrA(GWS, GV, Dr)
-    OA   <- get_OA(GWS, Gr, Cklein)
-    Dr_cum <- y_end["DrA_cum"] + y_end["DrB_cum"]
-    
-    ErrA <- y_end["A"] - (IA + y_end["NN_cum"] - y_end["OA_cum"] - y_end["DrA_cum"])
-    ErrB <- y_end["B"] - (IB + y_end["Kwel_cum"] - y_end["DrB_cum"])
-    ErrTot <- ErrA + ErrB + ErrCorr
-    
-    res <- add_row(res,
-                   Tijd = i*dt,
-                   A = y_end["A"], B = y_end["B"], GWS = GWS, GV = GV,
-                   NN = NN, OA = OA, DrA = DrA, Kwel = Kwel,
-                   DrB = DrB, Dr = Dr, H1 = H1, HSloo = HSloot,
-                   NN_cum = y_end["NN_cum"], OA_cum = y_end["OA_cum"], DrA_cum = y_end["DrA_cum"],
-                   Kwel_cum = y_end["Kwel_cum"], DrB_cum = y_end["DrB_cum"], Dr_cum = Dr_cum,
-                   ErrTot = ErrTot
-    )
-    
-    y <- y_end
-    
-    # progress update
-    if (!is.null(updateProgress)) {
-      updateProgress(i / n, detail = paste("Step", i, "of", n))
-    }
-    
-  }
-  
-  res
+
+  simulate_lens_cpp(
+    PorSat = inp$PorSat,
+    PorFr  = PorFr,
+    Mv     = inp$Mv,
+    Gr     = inp$Gr,
+    c0     = c0,
+    Wdr    = Wdr,
+    Cklein = Cklein,
+    I_GWS  = inp$I_GWS,  # ✅ initial groundwater level (lens)
+    I_GV   = inp$I_GV,   # ✅ initial groundwater level (aquifer)
+    dt     = inp$TimeStepSize,
+    nstep  = inp$TFinish,
+    nSub   = inp$I_nSubStep,
+    H1     = inp$external$H1,
+    HSloot = inp$external$HSloot,
+    NN     = inp$external$NN
+  )    
 }
+
+
 
 # ------------------ Server ----------------------------------------------------
 
@@ -575,8 +406,28 @@ server <- function(input, output, session) {
       obs_plot <- NULL
     }
     
-    x_min <- min(df_plot$Date, na.rm = TRUE)
-    x_max <- max(df_plot$Date, na.rm = TRUE)
+    
+    #x_min <- min(df_plot$Date, na.rm = TRUE)
+    #x_max <- max(df_plot$Date, na.rm = TRUE)
+    
+    sim_start <- min(stresses$Date, na.rm = TRUE)
+    sim_end   <- max(stresses$Date, na.rm = TRUE)
+    
+    x_min <- sim_start
+    x_max <- sim_end
+    
+    
+    # =========================================================
+    # FILTER OBSERVATIONS TO SIMULATION PERIOD (PLOTTING ONLY)
+    # =========================================================
+ #   if (!is.null(obs_plot)) {
+#      obs_plot <- obs_plot |>
+#        dplyr::filter(
+#          !is.na(Date),
+#          Date >= sim_start,
+#          Date <= sim_end
+#        )
+#    }
     
     # =========================================================
     # BASE PLOT
