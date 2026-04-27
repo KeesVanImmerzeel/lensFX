@@ -1,8 +1,10 @@
 library(shiny)
 library(ggplot2)
 library(plotly)
+library(shinyjs)
 
 fluidPage(
+  useShinyjs(),
   # Application title
   titlePanel("lensFX"), br(), 
   actionButton("run", "Update results and plots", class = "btn-warning"), br(), br(),
@@ -58,12 +60,6 @@ fluidPage(
     tabPanel(
       title = "Initial condition",
       sidebarPanel(
-        #dateInput(
-        #  "startdate",
-        #  "Start date",
-        #  format = "dd-mm-yyyy",
-        #  value = as.Date("24-10-2007")
-        #),
         numericInput(
           inputId = "I_GWS_NAP",
           label = "Initieel niveau grondwaterstand (m+NAP)",
@@ -98,6 +94,162 @@ fluidPage(
       ),
       tableOutput("view_observations_table")
     ),     
+    
+    
+    tabPanel(
+      title = "optimisation",
+      value = "optimisation",
+      
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          
+          h4("Parameter bounds"),
+          
+          sliderInput(
+            inputId = "opt_c0_range",
+            label   = "Hydraulic resistance c0 (days)",
+            min     = 1,
+            max     = 500,
+            value   = c(25, 150),
+            step    = 1
+          ),
+          
+          sliderInput(
+            inputId = "opt_Wdr_range",
+            label   = "Drainage resistance Wdr (days)",
+            min     = 1,
+            max     = 500,
+            value   = c(10, 200),
+            step    = 1
+          ),
+          
+          sliderInput(
+            inputId = "opt_Cklein_range",
+            label   = "Ditch resistance Cklein (days)",
+            min     = 1,
+            max     = 200,
+            value   = c(5, 80),
+            step    = 1
+          ),
+          
+          hr(),
+          
+          h4("Optimisation settings"),
+          
+          sliderInput(
+            "opt_weight_gws",
+            "Relative weight GWS vs GV",
+            min = 0, max = 1, value = 0.5, step = 0.05
+          ),
+          
+          selectInput(
+            inputId = "opt_method",
+            label   = "Optimisation method (bounded)",
+            choices = c(
+              "L-BFGS-B (bounded, recommended)" = "L-BFGS-B"
+            ),
+            selected = "L-BFGS-B"
+          ),
+          
+          numericInput(
+            inputId = "opt_maxiter",
+            label   = "Maximum iterations",
+            value   = 200,
+            min     = 10,
+            max     = 5000,
+            step    = 10
+          ),
+          
+          hr(),
+          
+          h4("Exclude parameters from optimisation"),
+          
+          helpText(
+            "Select parameters to keep fixed. ",
+            "You may exclude up to two parameters (at least one must remain free)."
+          ),
+          
+          checkboxGroupInput(
+            inputId = "opt_exclude_params",
+            label   = NULL,
+            choices = c(
+              "c0 (hydraulic resistance)"   = "c0",
+              "Wdr (drainage resistance)"   = "Wdr",
+              "Cklein (ditch resistance)"   = "Cklein"
+            ),
+            selected = character(0)
+          ),
+          
+          div(
+            style = "font-size: 0.9em; color: #666;",
+            "Example: selecting c0 and Wdr will optimise only Cklein."
+          ),
+          
+          actionButton(
+            inputId = "run_optimisation",
+            label   = "Run optimisation",
+            class   = "btn-danger"
+          )
+          
+        ),
+        
+        mainPanel(
+          width = 8,
+          helpText(
+            "The optimisation minimises the mismatch between observed and simulated ",
+            "groundwater levels (GWS and GV) within the specified parameter bounds."
+          ), br(), br(),
+          # ---------------------------
+          # OPTIMISATION STATUS
+          # ---------------------------
+          h4("Optimisation status"),
+          verbatimTextOutput("opt_status"),
+          
+          br(),
+          
+          # ---------------------------
+          # OPTIMISATION SUMMARY
+          # ---------------------------
+          #h4("Optimisation summary"),
+          #tableOutput("opt_summary"),
+          
+          #br(),
+          
+          # ---------------------------
+          # OPTIMISED PARAMETERS
+          # ---------------------------
+          h4("Optimised parameters"),
+          tableOutput("opt_results"),
+          #br(),
+          
+          
+          #h4("Parameter sensitivity"),
+          #tableOutput("sensitivity_table"),
+          
+          br(),
+          
+          h4("Scatterplots"),
+          fluidRow(
+            column(
+              6,
+              h5("Before optimisation"),
+              plotlyOutput("plot_xy_before", height = "360px")
+            ),
+            column(
+              6,
+              h5("After optimisation"),
+              plotlyOutput("plot_xy_after", height = "360px")
+            )
+          )
+        )       
+        
+      )
+    ),      
+    
+    
+    
+    
     tabPanel(
       title = "Results", 
       sidebarPanel(
@@ -142,6 +294,7 @@ fluidPage(
                  plotlyOutput("plot_cum", height = "720px")
                )
              )), 
+    
     tabPanel(title = "Documentation",
              tabsetPanel(
                tabPanel(title = "Schematic Diagram", tags$div(
@@ -219,7 +372,13 @@ fluidPage(
                  )
                )
              ))
-  )
+  ),
+  tags$script(HTML("
+  Shiny.addCustomMessageHandler('click', function(id) {
+    document.getElementById(id).click();
+  });
+"))
+
 )
 
 

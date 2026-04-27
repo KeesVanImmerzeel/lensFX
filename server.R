@@ -101,6 +101,300 @@ simulate_lens <- function(inp,
   )    
 }
 
+################# optimise ################
+prepare_observations <- function(obs, stresses, Topc0_NAP) {
+  
+  stopifnot(is.data.frame(obs))
+  stopifnot(nrow(stresses) > 0)
+  
+  start_date <- as.Date(stresses$Date[1])
+  
+  
+  obs2 <- obs |>
+    dplyr::mutate(
+      Date = as.Date(Date),
+      Type = trimws(Type),          # critical
+      Value_model = Value - Topc0_NAP
+    ) |>
+    dplyr::filter(
+      !is.na(Date),
+      Type %in% c("GWS_NAP", "GV_NAP")
+    )
+  
+  
+  if (nrow(obs2) == 0) {
+    stop("No valid observations after preprocessing (check dates and Type).")
+  }
+  
+  obs2
+} 
+
+objective_lens <- function(par_free,
+                           free_params,
+                           inp,
+                           obs,
+                           stresses,
+                           Topc0_NAP,
+                           weight_GWS = 0.5) {   # <-- OPEN BRACE HERE   # NEW: relative weight for GWS {
+  weight_GV <- 1 - weight_GWS
+  
+  # --------------------------------------------------
+  # 1. Reconstruct full parameter vector
+  # --------------------------------------------------
+  pars_full <- c(
+    c0     = inp$c0,
+    Wdr    = inp$Wdr,
+    Cklein = inp$Cklein
+  )
+  
+  pars_full[free_params] <- par_free
+  
+  # --------------------------------------------------
+  # 2. Run model
+  # --------------------------------------------------
+  sim <- simulate_lens(
+    inp,
+    c0_override     = pars_full["c0"],
+    Wdr_override    = pars_full["Wdr"],
+    Cklein_override = pars_full["Cklein"]
+  )
+  
+  # --------------------------------------------------
+  # 3. Prepare observations
+  # --------------------------------------------------
+  obs_prep <- prepare_observations(obs, stresses, Topc0_NAP)
+  
+  # Reconstruct model dates
+  sim_sel <- sim |>
+    dplyr::mutate(
+      Date = as.Date(stresses$Date[1]) + as.integer(Tijd)
+    ) |>
+    dplyr::select(Date, GWS, GV)
+  
+  df <- dplyr::left_join(obs_prep, sim_sel, by = "Date")
+  
+  # --------------------------------------------------
+  # 4. Residual selection (NO NA leakage)
+  # --------------------------------------------------
+  gws_rows <- df$Type == "GWS_NAP" & !is.na(df$GWS)
+  gv_rows  <- df$Type == "GV_NAP"  & !is.na(df$GV)
+  
+  n_gws <- sum(gws_rows)
+  n_gv  <- sum(gv_rows)
+  
+  if (n_gws + n_gv == 0) {
+    warning("No observations matched model output – returning large penalty.")
+    return(1e12)
+  }
+  
+  # --------------------------------------------------
+  # 5. Objective function (WEIGHTED & NORMALISED)
+  # --------------------------------------------------
+  
+  err <- 0
+  
+  if (n_gws > 0 && weight_GWS > 0) {
+    err_gws <- sum(
+      (df$GWS[gws_rows] - df$Value_model[gws_rows])^2
+    ) / n_gws
+    
+    err <- err + weight_GWS * err_gws
+  }
+  
+  if (n_gv > 0 && weight_GV > 0) {
+    err_gv <- sum(
+      (df$GV[gv_rows] - df$Value_model[gv_rows])^2
+    ) / n_gv
+    
+    err <- err + weight_GV * err_gv
+  }
+  
+  # --------------------------------------------------
+  # 6. Safety check
+  # --------------------------------------------------
+  if (!is.finite(err)) {
+    stop("Objective function produced non-finite value.")
+  }
+  
+  err
+}
+
+
+compute_sensitivity_oat <- function(par_full,
+                                    inp,
+                                    obs,
+                                    stresses,
+                                    Topc0_NAP,
+                                    delta_rel = 0.05) {
+  
+  base_params <- par_full
+  free_params <- names(par_full)
+  
+  # Base objective
+  J_base <- objective_lens(
+    par_free    = par_full,
+    free_params = free_params,
+    inp         = inp,
+    obs         = obs,
+    stresses    = stresses,
+    Topc0_NAP   = Topc0_NAP
+  )
+  
+  sens_list <- lapply(names(par_full), function(p) {
+    
+    par_up   <- par_full
+    par_down <- par_full
+    
+    par_up[p]   <- par_full[p] * (1 + delta_rel)
+    par_down[p] <- par_full[p] * (1 - delta_rel)
+    
+    J_up <- objective_lens(
+      par_free    = par_up,
+      free_params = free_params,
+      inp         = inp,
+      obs         = obs,
+      stresses    = stresses,
+      Topc0_NAP   = Topc0_NAP
+    )
+    
+    J_down <- objective_lens(
+      par_free    = par_down,
+      free_params = free_params,
+      inp         = inp,
+      obs         = obs,
+      stresses    = stresses,
+      Topc0_NAP   = Topc0_NAP
+    )
+    
+    sensitivity <- (J_up - J_down) / (2 * delta_rel * par_full[p])
+    
+    data.frame(
+      Parameter    = p,
+      Base_value   = par_full[p],
+      J_base       = J_base,
+      J_minus      = J_down,
+      J_plus       = J_up,
+      Sensitivity  = sensitivity,
+      row.names    = NULL
+    )
+  })
+  
+  do.call(rbind, sens_list)
+}
+
+
+build_xy_fit_data <- function(sim, obs, stresses, Topc0_NAP) {
+  
+  if (is.null(sim) || is.null(obs) || nrow(obs) == 0) {
+    return(NULL)
+  }
+  
+  # --- model output with real dates ---
+  sim_df <- sim |>
+    dplyr::mutate(
+      Date = as.Date(stresses$Date[1]) + as.integer(Tijd),
+      GWS_NAP = GWS + Topc0_NAP,
+      GV_NAP  = GV  + Topc0_NAP
+    ) |>
+    dplyr::select(Date, GWS_NAP, GV_NAP)
+  
+  # --- observations ---
+  obs_df <- obs |>
+    dplyr::mutate(
+      Date = as.Date(Date),
+      Type = trimws(Type),
+      Obs_NAP = Value
+    ) |>
+    dplyr::filter(Type %in% c("GWS_NAP", "GV_NAP"))
+  
+  # --- join ---
+  df <- dplyr::left_join(obs_df, sim_df, by = "Date")
+  
+  # --- long tidy format ---
+  df_long <- dplyr::bind_rows(
+    df |> dplyr::filter(Type == "GWS_NAP", !is.na(GWS_NAP)) |>
+      dplyr::transmute(
+        Type     = "GWS_NAP",
+        Observed = Obs_NAP,
+        Simulated = GWS_NAP
+      ),
+    
+    df |> dplyr::filter(Type == "GV_NAP", !is.na(GV_NAP)) |>
+      dplyr::transmute(
+        Type     = "GV_NAP",
+        Observed = Obs_NAP,
+        Simulated = GV_NAP
+      )
+  )
+  
+  df_long
+}
+
+plot_xy_from_df <- function(df, title_suffix = "") {
+  
+  r2 <- compute_r2(df)
+  
+  r2_txt <- paste0(
+    "R² all = ", sprintf("%.3f", r2$R2_all),
+    " | GWS = ", sprintf("%.3f", r2$R2_GWS),
+    " | GV = ", sprintf("%.3f", r2$R2_GV)
+  )
+  
+  p <- ggplot(df, aes(x = Observed, y = Simulated)) +
+    geom_abline(
+      slope = 1, intercept = 0,
+      colour = "black",
+      linetype = "dashed",
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = dplyr::filter(df, Type == "GWS_NAP"),
+      colour = "blue", alpha = 0.8, size = 2
+    ) +
+    geom_point(
+      data = dplyr::filter(df, Type == "GV_NAP"),
+      colour = "red", alpha = 0.8, size = 2
+    ) +
+    coord_equal() +
+    labs(
+      x = "Observed (m + NAP)",
+      y = "Simulated (m + NAP)",
+      title = "Observed vs Simulated levels"
+    ) +
+    theme_minimal(base_size = 14)
+  
+  list(plot = p, subtitle = paste(title_suffix, "—", r2_txt))
+}
+
+compute_r2 <- function(df) {
+  
+  # Guard
+  if (is.null(df) || nrow(df) < 2) {
+    return(list(
+      R2_all = NA_real_,
+      R2_GWS = NA_real_,
+      R2_GV  = NA_real_
+    ))
+  }
+  
+  r2_safe <- function(x, y) {
+    ok <- is.finite(x) & is.finite(y)
+    if (sum(ok) < 2) return(NA_real_)
+    cor(x[ok], y[ok])^2
+  }
+  
+  list(
+    R2_all = r2_safe(df$Observed, df$Simulated),
+    R2_GWS = r2_safe(
+      df$Observed[df$Type == "GWS_NAP"],
+      df$Simulated[df$Type == "GWS_NAP"]
+    ),
+    R2_GV  = r2_safe(
+      df$Observed[df$Type == "GV_NAP"],
+      df$Simulated[df$Type == "GV_NAP"]
+    )
+  )
+}
 
 
 # ------------------ Server ----------------------------------------------------
@@ -116,9 +410,18 @@ server <- function(input, output, session) {
   stresses_reactive <- reactiveVal(stresses_global)
   
   observations_reactive <- reactiveVal(observations_global) 
+  res_pre_opt <- reactiveVal(NULL)
+  
   # Resultaten
   res1 <- reactiveVal(NULL)    
   stats_reactive <- reactiveVal(NULL)
+  
+  opt_par_reactive     <- reactiveVal(NULL)
+  opt_summary_reactive <- reactiveVal(NULL)
+  opt_status_reactive  <- reactiveVal(NULL)
+  sensitivity_reactive <- reactiveVal(NULL)
+  optimisation_done <- reactiveVal(FALSE)
+  opt_simulation_done <- reactiveVal(FALSE)
 
   
   # Update global tibble 'stresses_global' when the user uploads Excel
@@ -248,6 +551,12 @@ server <- function(input, output, session) {
   # Maken invoer (inp() en run)
   inp <- reactiveVal(NULL)
   observeEvent(input$run, {
+  #optimisation_done(FALSE)   # ✅ RESET STATE
+
+    if (is.null(res_pre_opt())) {
+      res_pre_opt(NULL)
+    }
+    
     ext_df <- stresses_reactive()
     
     
@@ -296,6 +605,12 @@ server <- function(input, output, session) {
       }
     )
     res1(r)
+    
+    # ✅ Capture baseline ONLY ON FIRST RUN
+    if (is.null(res_pre_opt())) {
+      res_pre_opt(r)
+    }
+
     showNotification("Results and plots are updated", type = "message")
   })
   
@@ -721,8 +1036,12 @@ server <- function(input, output, session) {
       paste0("LensFX_input_", Sys.Date(), ".rds")
     },
     content = function(file) {
+      
       saveRDS(
         list(
+          # ---------------------------
+          # SYSTEM
+          # ---------------------------
           Mv_NAP     = input$Mv_NAP,
           Gr_NAP     = input$Gr_NAP,
           Topc0_NAP  = input$Topc0_NAP,
@@ -733,9 +1052,33 @@ server <- function(input, output, session) {
           c0         = input$c0,
           Wdr        = input$Wdr,
           Cklein     = input$Cklein,
+          
+          # ---------------------------
+          # INITIAL CONDITIONS
+          # ---------------------------
           I_nSubStep = input$I_nSubStep,
           I_GWS_NAP  = input$I_GWS_NAP,
-          I_GV_NAP   = input$I_GV_NAP
+          I_GV_NAP   = input$I_GV_NAP,
+          
+          # ---------------------------
+          # OPTIMISATION SETTINGS
+          # ---------------------------
+          opt = list(
+            c0_range      = input$opt_c0_range,
+            Wdr_range     = input$opt_Wdr_range,
+            Cklein_range  = input$opt_Cklein_range,
+            weight_gws    = input$opt_weight_gws,
+            method        = input$opt_method,
+            maxiter       = input$opt_maxiter,
+            exclude       = input$opt_exclude_params
+          ),
+          
+          # ---------------------------
+          # OPTIONAL: RESULTS
+          # ---------------------------
+          optimisation_done = optimisation_done(),
+          optimised_params  = opt_par_reactive(),
+          opt_summary       = opt_summary_reactive()
         ),
         file
       )
@@ -909,24 +1252,64 @@ server <- function(input, output, session) {
   # UPLOAD SETTINGS (System + Initial + Stresses)
   # ---------------------------
   observeEvent(input$upload_all_input, {
+    
     req(input$upload_all_input)
     
     vals <- readRDS(input$upload_all_input$datapath)
     
+    # ---------------------------
+    # SYSTEM
+    # ---------------------------
     updateNumericInput(session, "Mv_NAP", value = vals$Mv_NAP)
     updateNumericInput(session, "Gr_NAP", value = vals$Gr_NAP)
     updateNumericInput(session, "Topc0_NAP", value = vals$Topc0_NAP)
-    updateNumericInput(session, "EW_diepte", value = vals$EW_diepte)  
-    updateNumericInput(session, "z_krit", value = vals$z_krit)  
+    updateNumericInput(session, "EW_diepte", value = vals$EW_diepte)
+    updateNumericInput(session, "z_krit", value = vals$z_krit)
     updateNumericInput(session, "PorSat", value = vals$PorSat)
     updateNumericInput(session, "PorFr", value = vals$PorFr)
     updateNumericInput(session, "c0", value = vals$c0)
     updateNumericInput(session, "Wdr", value = vals$Wdr)
     updateNumericInput(session, "Cklein", value = vals$Cklein)
+    
+    # ---------------------------
+    # INITIAL CONDITIONS
+    # ---------------------------
     updateNumericInput(session, "I_nSubStep", value = vals$I_nSubStep)
     updateNumericInput(session, "I_GWS_NAP", value = vals$I_GWS_NAP)
     updateNumericInput(session, "I_GV_NAP", value = vals$I_GV_NAP)
-  })  
+    
+    # ---------------------------
+    # OPTIMISATION SETTINGS
+    # ---------------------------
+    if (!is.null(vals$opt)) {
+      
+      updateSliderInput(session, "opt_c0_range",
+                        value = vals$opt$c0_range)
+      
+      updateSliderInput(session, "opt_Wdr_range",
+                        value = vals$opt$Wdr_range)
+      
+      updateSliderInput(session, "opt_Cklein_range",
+                        value = vals$opt$Cklein_range)
+      
+      updateSliderInput(session, "opt_weight_gws",
+                        value = vals$opt$weight_gws)
+      
+      updateSelectInput(session, "opt_method",
+                        selected = vals$opt$method)
+      
+      updateNumericInput(session, "opt_maxiter",
+                         value = vals$opt$maxiter)
+      
+      updateCheckboxGroupInput(
+        session,
+        "opt_exclude_params",
+        selected = vals$opt$exclude %||% character(0)
+      )
+    }
+    
+    showNotification("All model and optimisation settings restored.", type = "message")
+  })
 
   observe({
     df <- stresses_reactive()
@@ -1083,5 +1466,310 @@ server <- function(input, output, session) {
     }
   )
   
+  observeEvent(input$run_optimisation, {
     
+    # --------------------------------------------------
+    # 1. VALIDATION
+    # --------------------------------------------------
+    
+    if (is.null(inp())) {
+      showModal(modalDialog(
+        title = "Model not initialised",
+        "Please run the model first before starting optimisation.",
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    obs <- observations_reactive()
+    if (is.null(obs) || nrow(obs) == 0) {
+      showModal(modalDialog(
+        title = "No observations available",
+        "Upload at least one observation (GWS or GV) before optimising.",
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    all_params <- c("c0", "Wdr", "Cklein")
+    excluded   <- input$opt_exclude_params
+    
+    if (length(excluded) >= 3) {
+      showModal(modalDialog(
+        title = "Invalid optimisation settings",
+        "At least one parameter must remain free.",
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    free_params <- setdiff(all_params, excluded)
+    
+    # --------------------------------------------------
+    # 2. INITIAL VALUES AND BOUNDS
+    # --------------------------------------------------
+    
+    par_full <- c(
+      c0     = input$c0,
+      Wdr    = input$Wdr,
+      Cklein = input$Cklein
+    )
+    
+    par0 <- par_full[free_params]
+    
+    lower <- c(
+      c0     = input$opt_c0_range[1],
+      Wdr    = input$opt_Wdr_range[1],
+      Cklein = input$opt_Cklein_range[1]
+    )[free_params]
+    
+    upper <- c(
+      c0     = input$opt_c0_range[2],
+      Wdr    = input$opt_Wdr_range[2],
+      Cklein = input$opt_Cklein_range[2]
+    )[free_params]
+    
+    # --------------------------------------------------
+    # 3. OBJECTIVE BEFORE OPTIMISATION
+    # --------------------------------------------------
+    
+    init_err <- objective_lens(
+      par_free    = par0,
+      free_params = free_params,
+      inp         = inp(),
+      obs         = obs,
+      stresses    = stresses_reactive(),
+      Topc0_NAP   = input$Topc0_NAP
+    )
+    
+    # --------------------------------------------------
+    # 4. RUN OPTIMISER (L-BFGS-B)
+    # --------------------------------------------------
+    
+    progress <- shiny::Progress$new()
+    on.exit(progress$close())
+    progress$set(message = "Optimising parameters…", value = 0)
+    
+    opt <- optim(
+      par         = par0,
+      fn          = objective_lens,
+      free_params = free_params,
+      inp         = inp(),
+      obs         = obs,
+      stresses    = stresses_reactive(),
+      Topc0_NAP   = input$Topc0_NAP,
+      weight_GWS  = input$opt_weight_gws,
+      method      = "L-BFGS-B",
+      lower       = lower,
+      upper       = upper,
+      control     = list(
+        maxit    = input$opt_maxiter,
+        parscale = par0
+      )
+    )
+    optimisation_done(TRUE)
+    
+    # --------------------------------------------------
+    # 5. UPDATE NUMERIC INPUTS
+    # --------------------------------------------------
+    
+    if ("c0" %in% names(opt$par)) {
+      updateNumericInput(session, "c0", value = as.numeric(opt$par["c0"]))
+    }
+    if ("Wdr" %in% names(opt$par)) {
+      updateNumericInput(session, "Wdr", value = as.numeric(opt$par["Wdr"]))
+    }
+    if ("Cklein" %in% names(opt$par)) {
+      updateNumericInput(session, "Cklein", value = as.numeric(opt$par["Cklein"]))
+    }
+    
+    
+    # --------------------------------------------------
+    # 9. SENSITIVITY ANALYSIS (LOCAL OAT)
+    # --------------------------------------------------
+    
+    par_optimised <- c(
+      c0     = as.numeric(opt$par["c0"]), #input$c0,
+      Wdr    = as.numeric(opt$par["Wdr"]), #input$Wdr,
+      Cklein = as.numeric(opt$par["Cklein"]) #input$Cklein
+    )
+    
+    sens_df <- compute_sensitivity_oat(
+      par_full  = par_optimised,
+      inp       = inp(),
+      obs       = obs,
+      stresses  = stresses_reactive(),
+      Topc0_NAP = input$Topc0_NAP,
+      delta_rel = 0.05
+    )
+    
+    sensitivity_reactive(sens_df)
+    
+    
+    # --------------------------------------------------
+    # 6. STORE OPTIMISATION RESULTS (REACTIVE)
+    # --------------------------------------------------
+    
+    opt_par_reactive(
+      data.frame(
+        Parameter = names(opt$par),
+        Value     = round(as.numeric(opt$par), 3),
+        row.names = NULL
+      )
+    )
+    
+    final_err <- opt$value
+    abs_improvement <- init_err - final_err
+    rel_improvement <- if (init_err > 0)
+      100 * abs_improvement / init_err else NA_real_
+    
+    opt_summary_reactive(
+      data.frame(
+        Metric = c(
+          "Initial objective value",
+          "Final objective value",
+          "Absolute improvement",
+          "Relative improvement (%)"
+        ),
+        Value = round(
+          c(init_err, final_err, abs_improvement, rel_improvement),
+          c(4, 4, 4, 2)
+        ),
+        row.names = NULL
+      )
+    )
+    
+    opt_status_reactive(
+      paste0(
+        "Optimisation completed successfully.\n\n",
+        "Initial objective value : ", round(init_err, 4), "\n",
+        "Final objective value   : ", round(final_err, 4), "\n\n",
+        "Absolute improvement    : ", round(abs_improvement, 4), "\n",
+        "Relative improvement    : ", round(rel_improvement, 2), " %\n",
+        "Convergence code        : ", opt$convergence
+      )
+    )
+    
+    # --------------------------------------------------
+    # 7. USER FEEDBACK
+    # --------------------------------------------------
+    
+    if (is.finite(rel_improvement) && rel_improvement > 1) {
+      showNotification(
+        paste0("Optimisation improved the fit by ",
+               round(rel_improvement, 1), "%."),
+        type = "message"
+      )
+    } else {
+      showNotification(
+        "Optimisation completed, but improvement is small.",
+        type = "warning"
+      )
+    }
+    
+    # --------------------------------------------------
+    # 8. RE-RUN MODEL WITH OPTIMISED PARAMETERS (CORRECT)
+    # --------------------------------------------------
+    
+    r_opt <- simulate_lens(
+      inp(),
+      c0_override     = as.numeric(opt$par["c0"]),
+      Wdr_override    = as.numeric(opt$par["Wdr"]),
+      Cklein_override = as.numeric(opt$par["Cklein"])
+    )
+    
+    res1(r_opt)  
+    opt_simulation_done(TRUE)
+
+  })
+
+  # ---------------------------------
+  # Optimisation outputs
+  # ---------------------------------
+  
+  output$opt_status <- renderText({
+    req(opt_status_reactive())
+    opt_status_reactive()
+  })
+  
+  output$opt_summary <- renderTable({
+    req(opt_summary_reactive())
+    opt_summary_reactive()
+  })
+  
+  output$opt_results <- renderTable({
+    req(opt_par_reactive())
+    opt_par_reactive()
+  })
+  
+  output$sensitivity_table <- renderTable({
+    req(sensitivity_reactive())
+    sensitivity_reactive()
+  })
+  
+  output$plot_xy_before <- plotly::renderPlotly({
+    
+    req(res_pre_opt())
+    req(observations_reactive())
+    
+    df_before <- build_xy_fit_data(
+      sim       = res_pre_opt(),
+      obs       = observations_reactive(),
+      stresses  = stresses_reactive(),
+      Topc0_NAP = input$Topc0_NAP
+    )
+    
+    validate(need(nrow(df_before) > 0,
+                  "No matched observations (before optimisation)."))
+    
+    out <- plot_xy_from_df(df_before, "Before optimisation")
+    
+    plotly::ggplotly(out$plot) |>
+      plotly::layout(
+        title = list(
+          text = paste(
+            "Observed vs Simulated levels",
+            "<br><span style='font-size:12px;'>", out$subtitle, "</span>"
+          )
+        ),
+        paper_bgcolor = "white",
+        plot_bgcolor  = "white",
+        hovermode     = "closest"
+      ) |>
+      plotly::config(displaylogo = FALSE)
+  })
+  
+  output$plot_xy_after <- plotly::renderPlotly({
+    
+    req(opt_simulation_done())
+    req(optimisation_done())
+    req(res1())
+    req(observations_reactive())
+    
+    df_after <- build_xy_fit_data(
+      sim       = res1(),
+      obs       = observations_reactive(),
+      stresses  = stresses_reactive(),
+      Topc0_NAP = input$Topc0_NAP
+    )
+    
+    validate(need(nrow(df_after) > 0,
+                  "No matched observations (after optimisation)."))
+    
+    out <- plot_xy_from_df(df_after, "After optimisation")
+    
+    plotly::ggplotly(out$plot) |>
+      plotly::layout(
+        title = list(
+          text = paste(
+            "Observed vs Simulated levels",
+            "<br><span style='font-size:12px;'>", out$subtitle, "</span>"
+          )
+        ),
+        paper_bgcolor = "white",
+        plot_bgcolor  = "white",
+        hovermode     = "closest"
+      ) |>
+      plotly::config(displaylogo = FALSE)
+  })
 }
