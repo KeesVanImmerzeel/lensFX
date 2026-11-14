@@ -431,13 +431,29 @@ server <- function(input, output, session) {
   observeEvent(input$stresses_file, {
     req(input$stresses_file)
     
-    df <- readxl::read_excel(
-      input$stresses_file$datapath,
-      col_types = c("date", "numeric", "numeric", "numeric")
-    ) |>
-      dplyr::select(Date, Hdiep_NAP, Hsloot_NAP, NN_mm)
+    df <- readxl::read_excel(input$stresses_file$datapath)
     
-    df$Date <- as.Date(df$Date) # ensure Date class 
+    required_cols <- c("Date", "Hdiep_NAP", "Hsloot_NAP", "NN_mm")
+    
+    missing_cols <- setdiff(required_cols, names(df))
+    
+    if (length(missing_cols) > 0) {
+      stop(
+        paste(
+          "Missing required columns:",
+          paste(missing_cols, collapse = ", ")
+        )
+      )
+    }
+    
+    df <- df |>
+      dplyr::select(all_of(required_cols)) |>
+      dplyr::mutate(
+        Date       = as.Date(Date),
+        Hdiep_NAP  = as.numeric(Hdiep_NAP),
+        Hsloot_NAP = as.numeric(Hsloot_NAP),
+        NN_mm      = as.numeric(NN_mm)
+      )
     
     # Update reactive value
     stresses_reactive(df)
@@ -448,20 +464,37 @@ server <- function(input, output, session) {
   
   # Update global tibble 'observations_global' when the user uploads Excel  
   observeEvent(input$observations_file, {
+    
     req(input$observations_file)
     
-    df <- readxl::read_excel(
-      input$observations_file$datapath,
-      col_types = c("date", "numeric", "text")  # Date, Value, Type
-    ) |>
-      dplyr::select(Date, Value, Type)
+    df <- readxl::read_excel(input$observations_file$datapath)
     
-    df$Date <- as.Date(df$Date)  # ensure Date class
+    required_cols <- c("Date", "Value", "Type")
     
-    # Update reactive value
+    missing_cols <- setdiff(required_cols, names(df))
+    
+    if (length(missing_cols) > 0) {
+      showModal(modalDialog(
+        title = "Invalid observations file",
+        paste(
+          "Missing required columns:",
+          paste(missing_cols, collapse = ", ")
+        ),
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    df <- df |>
+      dplyr::select(all_of(required_cols)) |>
+      dplyr::mutate(
+        Date  = as.Date(Date),
+        Value = as.numeric(Value),
+        Type  = trimws(as.character(Type))
+      )
+    
     observations_reactive(df)
     
-    # Update global tibble
     observations_global <<- df
   })
   
@@ -1043,9 +1076,8 @@ server <- function(input, output, session) {
       
       saveRDS(
         list(
-          # ---------------------------
+          
           # SYSTEM
-          # ---------------------------
           Mv_NAP     = input$Mv_NAP,
           Gr_NAP     = input$Gr_NAP,
           Topc0_NAP  = input$Topc0_NAP,
@@ -1058,16 +1090,12 @@ server <- function(input, output, session) {
           inf_fact   = input$inf_fact,
           Cklein     = input$Cklein,
           
-          # ---------------------------
-          # INITIAL CONDITIONS
-          # ---------------------------
+          # INITIAL
           I_nSubStep = input$I_nSubStep,
           I_GWS_NAP  = input$I_GWS_NAP,
           I_GV_NAP   = input$I_GV_NAP,
           
-          # ---------------------------
-          # OPTIMISATION SETTINGS
-          # ---------------------------
+          # OPT
           opt = list(
             c0_range      = input$opt_c0_range,
             Wdr_range     = input$opt_Wdr_range,
@@ -1078,15 +1106,18 @@ server <- function(input, output, session) {
             exclude       = input$opt_exclude_params
           ),
           
-          # ---------------------------
-          # OPTIONAL: RESULTS
-          # ---------------------------
+          # NEW
+          stresses     = stresses_reactive(),
+          observations = observations_reactive(),
+          
           optimisation_done = optimisation_done(),
           optimised_params  = opt_par_reactive(),
           opt_summary       = opt_summary_reactive()
+          
         ),
         file
       )
+      
     }
   )
   
@@ -1318,6 +1349,24 @@ server <- function(input, output, session) {
       )
     }
     
+    if (!is.null(vals$stresses)) {
+      
+      vals$stresses$Date <- as.Date(vals$stresses$Date)
+      
+      stresses_reactive(vals$stresses)
+      
+      stresses_global <<- vals$stresses
+    }
+    
+    if (!is.null(vals$observations)) {
+      
+      vals$observations$Date <- as.Date(vals$observations$Date)
+      
+      observations_reactive(vals$observations)
+      
+      observations_global <<- vals$observations
+    }
+    
     showNotification("All model and optimisation settings restored.", type = "message")
   })
 
@@ -1400,7 +1449,7 @@ server <- function(input, output, session) {
       df$Date <- as.Date(df$Date)
       
       wb <- openxlsx::createWorkbook()
-      openxlsx::addWorksheet(wb, "stresses")
+      openxlsx::addWorksheet(wb, "observations")
       
       openxlsx::writeData(wb, sheet = 1, x = df)
       
