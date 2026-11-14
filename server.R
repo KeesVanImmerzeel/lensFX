@@ -29,8 +29,8 @@ get_GV   <- function(B, PorSat)
 get_Kwel <- function(H1, GWS, c0)
   get_Kwel_cpp(H1, GWS, c0)
 
-get_Dr   <- function(GWS, HSloot, Wdr)
-  get_Dr_cpp(GWS, HSloot, Wdr)
+get_Dr <- function(GWS, HSloot, Wdr, inf_fact)
+  get_Dr_cpp(GWS, HSloot, Wdr, inf_fact)
 
 get_DrB  <- function(GV, GWS, Dr)
   get_DrB_cpp(GV, GWS, Dr)
@@ -74,12 +74,14 @@ simulate_lens <- function(inp,
                           PorFr_override = NULL,
                           c0_override = NULL,
                           Wdr_override = NULL,
+                          inf_fact_override = NULL,
                           Cklein_override = NULL,
                           updateProgress = NULL) {   # <- KEEP THIS
   
   PorFr  <- if (!is.null(PorFr_override)) PorFr_override else inp$PorFr
   c0     <- if (!is.null(c0_override))    c0_override    else inp$c0
   Wdr    <- if (!is.null(Wdr_override))   Wdr_override   else inp$Wdr
+  inf_fact    <- if (!is.null(inf_fact_override))   inf_fact_override   else inp$inf_fact
   Cklein <- if (!is.null(Cklein_override)) Cklein_override else inp$Cklein
 
   simulate_lens_cpp(
@@ -89,6 +91,7 @@ simulate_lens <- function(inp,
     Gr     = inp$Gr,
     c0     = c0,
     Wdr    = Wdr,
+    inf_fact = inf_fact,
     Cklein = Cklein,
     I_GWS  = inp$I_GWS,  # ✅ initial groundwater level (lens)
     I_GV   = inp$I_GV,   # ✅ initial groundwater level (aquifer)
@@ -583,6 +586,7 @@ server <- function(input, output, session) {
       Gr = Gr, #Gr tov topc0_NAP
       c0=input$c0,
       Wdr=input$Wdr,
+      inf_fact=input$inf_fact,
       Cklein=input$Cklein,
       I_GV=input$I_GV_NAP - input$Topc0_NAP,
       I_GWS=input$I_GWS_NAP - input$Topc0_NAP,
@@ -1051,6 +1055,7 @@ server <- function(input, output, session) {
           PorFr      = input$PorFr,
           c0         = input$c0,
           Wdr        = input$Wdr,
+          inf_fact   = input$inf_fact,
           Cklein     = input$Cklein,
           
           # ---------------------------
@@ -1269,6 +1274,11 @@ server <- function(input, output, session) {
     updateNumericInput(session, "PorFr", value = vals$PorFr)
     updateNumericInput(session, "c0", value = vals$c0)
     updateNumericInput(session, "Wdr", value = vals$Wdr)
+    updateNumericInput(
+      session,
+      "inf_fact",
+      value = if (!is.null(vals$inf_fact)) vals$inf_fact else 0
+    )
     updateNumericInput(session, "Cklein", value = vals$Cklein)
     
     # ---------------------------

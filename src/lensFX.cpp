@@ -22,9 +22,12 @@ inline double get_Kwel_core(double H1, double GWS, double c0) {
 }
 
 // --- Total drainage
-inline double get_Dr_core(double GWS, double HSloot, double Wdr) {
+inline double get_Dr_core(double GWS,
+                          double HSloot,
+                          double Wdr,
+                          double inf_fact) {
   double x = (GWS - HSloot) / Wdr;
-  return (x > 0.0) ? x : 0.0;
+  return (x > 0.0) ? x : inf_fact * x;
 }
 
 // --- Drainage from B
@@ -64,8 +67,11 @@ double get_Kwel_cpp(double H1, double GWS, double c0) {
 }
 
 // [[Rcpp::export]]
-double get_Dr_cpp(double GWS, double HSloot, double Wdr) {
-  return get_Dr_core(GWS, HSloot, Wdr);
+double get_Dr_cpp(double GWS,
+                  double HSloot,
+                  double Wdr,
+                  double inf_fact) {
+  return get_Dr_core(GWS, HSloot, Wdr, inf_fact);
 }
 
 // [[Rcpp::export]]
@@ -108,12 +114,13 @@ List lens_derivs_cpp(double t, NumericVector y, List pars) {
   const double Wdr    = pars["Wdr"];
   const double Cklein = pars["Cklein"];
   const double Gr     = pars["Gr"];
+  const double inf_fact = pars["inf_fact"];
   
   // --- Derived states
   const double GWS  = get_GWS_core(A, B, Mv, PorFc, PorFr);
   const double GV   = get_GV_core(B, PorSat);
   const double Kwel = get_Kwel_core(H1, GWS, c0);
-  const double Dr   = get_Dr_core(GWS, HSloot, Wdr);
+  const double Dr = get_Dr_core( GWS, HSloot, Wdr, inf_fact);
   const double DrB  = get_DrB_core(GV, GWS, Dr);
   const double DrA  = get_DrA_core(GWS, GV, Dr);
   const double OA   = get_OA_core(GWS, Gr, Cklein);
@@ -245,6 +252,7 @@ DataFrame simulate_lens_cpp(
     double Gr,
     double c0,
     double Wdr,
+	double inf_fact,
     double Cklein,
     double I_GWS,
     double I_GV,
@@ -286,7 +294,7 @@ DataFrame simulate_lens_cpp(
     if (i < nstep) {
       NN_out[i] = NN[i];
       Kwel[i] = get_Kwel_core(H1[i], GWS[i], c0);
-      Dr[i]   = get_Dr_core(GWS[i], HSloot[i], Wdr);
+      Dr[i]   = get_Dr_core(GWS[i], HSloot[i], Wdr, inf_fact);
       DrB[i]  = get_DrB_core(GV[i], GWS[i], Dr[i]);
       DrA[i]  = get_DrA_core(GWS[i], GV[i], Dr[i]);
       OA[i]   = get_OA_core(GWS[i], Gr, Cklein);
@@ -316,6 +324,7 @@ DataFrame simulate_lens_cpp(
       _["Gr"]      = Gr,
       _["c0"]      = c0,
       _["Wdr"]     = Wdr,
+	  _["inf_fact"] = inf_fact,
       _["Cklein"]  = Cklein,
       _["H1"]      = H1[i],
                        _["HSloot"]  = HSloot[i],

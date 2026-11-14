@@ -46,6 +46,7 @@ fluidPage(
         ),
         numericInput("c0", "Hydraulische weerstand c0 (d)", 50, min = 25),
         numericInput("Wdr", "Drainage weerstand (d)", 75, min = 1),
+        numericInput( "inf_fact", "Infiltratiefactor (-)", value = 0, min = 0, max = 1, step = 0.1 ),
         numericInput("Cklein", "Greppelweerstand (d)", 25, min = 1),
         numericInput(
           inputId = "I_nSubStep",
