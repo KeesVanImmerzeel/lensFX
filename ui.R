@@ -80,7 +80,9 @@ fluidPage(
       sidebarPanel(
         width=5,
         fileInput("stresses_file", "Upload Excel file", accept = c(".xlsx", ".xls")), 
-        downloadButton("download_stresses_excel", "Download stresses (Excel)")
+        downloadButton("download_stresses_excel", "Download stresses (Excel)"),
+        br(), br(),
+        actionButton("clear_stresses", "Clear stresses", class = "btn-danger")
       ),
       tableOutput("view_stresses_table")
     ),
@@ -248,17 +250,14 @@ fluidPage(
       )
     ),      
     
-    
-    
-    
     tabPanel(
       title = "Results", 
       sidebarPanel(
-        width = 7,
-        downloadButton("download_results_excel", "Download results table (Excel)"), br(), br(),
+        width = 3,
         
         downloadButton("download_stats_excel", "Download statistics table (Excel)"),
         br(), br(),
+        downloadButton("download_results_excel", "Download results table (Excel)"), br(), br(),
         
         dateInput("stats_from", "Statistieken van:", value = NULL,
                   format = "dd-mm-yyyy", language = "nl"),

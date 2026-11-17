@@ -672,14 +672,35 @@ server <- function(input, output, session) {
   })
   
   output$view_results_table <- renderTable({
-    df <- res1()
     
-    # Create a display version
-    df_display <- df
-    #df_display$Date <- format(df$Date, "%d-%m-%Y")
+    req(res1())
+    
+    df_display <- make_results_table(
+      res1(),
+      stresses_reactive()$Date[1],
+      input$Topc0_NAP
+    )
+    
+    # NAP columns: 2 decimals
+    nap_cols <- c("GWS_NAP", "GV_NAP")
+    
+    df_display[nap_cols] <- lapply(
+      df_display[nap_cols],
+      \(x) sprintf("%.2f", x)
+    )
+    
+    # mm columns: 1 decimal
+    mm_cols <- grep("_mm$", names(df_display), value = TRUE)
+    
+    df_display[mm_cols] <- lapply(
+      df_display[mm_cols],
+      \(x) sprintf("%.1f", x)
+    )
     
     df_display
-  })
+    
+  },
+  rownames = FALSE)
   
   # ---------------------------
   # Plot levels
@@ -1406,6 +1427,29 @@ server <- function(input, output, session) {
     
     showNotification("Observations cleared.", type = "warning")
   })  
+  
+  observeEvent(input$clear_stresses, {
+    
+    stresses_reactive(tibble::tibble(
+      Date       = as.Date(character()),
+      Hdiep_NAP  = numeric(),
+      Hsloot_NAP = numeric(),
+      NN_mm      = numeric()
+    ))
+    
+    stresses_global <<- tibble::tibble(
+      Date       = as.Date(character()),
+      Hdiep_NAP  = numeric(),
+      Hsloot_NAP = numeric(),
+      NN_mm      = numeric()
+    )
+    
+    res1(NULL)
+    res_pre_opt(NULL)
+    
+    showNotification("Stresses cleared.", type = "warning")
+  })
+  
     
   output$download_stresses_excel <- downloadHandler(
     filename = function() {
@@ -1465,46 +1509,164 @@ server <- function(input, output, session) {
       
       openxlsx::saveWorkbook(wb, path, overwrite = TRUE)
     }
-  )  
+  )
+  
+  # Helper function to use both for the table view and the Excel export.
+  make_results_table <- function(df, start_date, topc0_nap) {
+    
+    df |>
+      dplyr::mutate(
+        
+        # Real calendar date
+        Date = format(
+          as.Date(start_date) + as.integer(Tijd),
+          "%d-%m-%Y"
+        ),
+        
+        # Water levels (m+NAP)
+        GWS_NAP = GWS + topc0_nap,
+        GV_NAP  = GV  + topc0_nap,
+        
+        # Storages (mm)
+        A_mm = A * 1000,
+        B_mm = B * 1000,
+        
+        # Fluxes (mm/day)
+        NN_mm   = NN   * 1000,
+        OA_mm   = OA   * 1000,
+        Kwel_mm = Kwel * 1000,
+        Dr_mm   = Dr   * 1000,
+        DrA_mm  = DrA  * 1000,
+        DrB_mm  = DrB  * 1000,
+        
+        # Cumulative fluxes (mm)
+        NNcum_mm   = NN_cum   * 1000,
+        OAcum_mm   = OA_cum   * 1000,
+        DrAcum_mm  = DrA_cum  * 1000,
+        Kwelcum_mm = Kwel_cum * 1000,
+        DrBcum_mm  = DrB_cum  * 1000,
+        ErrTot_mm  = ErrTot   * 1000
+      ) |>
+      
+      dplyr::select(
+        Date,
+        GWS_NAP,
+        GV_NAP,
+        A_mm,
+        B_mm,
+        NN_mm,
+        OA_mm,
+        Kwel_mm,
+        Dr_mm,
+        DrA_mm,
+        DrB_mm,
+        NNcum_mm,
+        OAcum_mm,
+        DrAcum_mm,
+        Kwelcum_mm,
+        DrBcum_mm,
+        ErrTot_mm
+      )
+  }  
   
   output$download_results_excel <- downloadHandler(
+    
     filename = function() {
       paste0("results_", Sys.Date(), ".xlsx")
     },
+    
     content = function(path) {
       
       req(res1())
       
-      df <- res1()
+      df_export <- make_results_table(
+        res1(),
+        stresses_reactive()$Date[1],
+        input$Topc0_NAP
+      )
       
-      # Convert to real dates
-      start_date <- stresses_reactive()$Date[1]
-      df$Date <- as.Date(start_date) + as.integer(df$Tijd)
+      # Convert Date back to a true Date for Excel
+      df_export$Date <- as.Date(df_export$Date, format = "%d-%m-%Y")
       
-      # ---- Add converted values ----
-      df$GWS_NAP  <- df$GWS + input$Topc0_NAP
-      df$GV_NAP   <- df$GV  + input$Topc0_NAP
-      df$A_mm     <- df$A  * 1000
-      df$B_mm     <- df$B  * 1000
+      # Create workbook
+      wb <- openxlsx::createWorkbook()
+      openxlsx::addWorksheet(wb, "Results")
       
-      # Fluxes (mm/day)
-      df$NN_mm     <- df$NN   * 1000
-      df$OA_mm     <- df$OA   * 1000
-      df$Kwel_mm   <- df$Kwel * 1000
-      df$Dr_mm     <- df$Dr   * 1000
-      df$DrA_mm    <- df$DrA  * 1000
-      df$DrB_mm    <- df$DrB  * 1000
+      # Write data
+      openxlsx::writeData(
+        wb,
+        sheet = "Results",
+        x = df_export
+      )
       
-      # Cumulative volumes (mm)
-      df$NNcum_mm   <- df$NN_cum   * 1000
-      df$OAcum_mm   <- df$OA_cum   * 1000
-      df$DrAcum_mm  <- df$DrA_cum  * 1000
-      df$Kwelcum_mm <- df$Kwel_cum * 1000
-      df$DrBcum_mm  <- df$DrB_cum  * 1000
-      df$ErrTot_mm  <- df$ErrTot   * 1000
+      # Styles
+      style_date <- openxlsx::createStyle(numFmt = "dd-mm-yyyy")
+      style_nap  <- openxlsx::createStyle(numFmt = "0.00")
+      style_mm   <- openxlsx::createStyle(numFmt = "0.0")
       
-      # Write to Excel
-      writexl::write_xlsx(df, path)
+      headers <- names(df_export)
+      
+      # Date column
+      date_col <- which(headers == "Date")
+      
+      openxlsx::addStyle(
+        wb,
+        sheet = "Results",
+        style = style_date,
+        rows = 2:(nrow(df_export) + 1),
+        cols = date_col,
+        gridExpand = TRUE,
+        stack = TRUE
+      )
+      
+      # NAP columns (2 decimals)
+      nap_cols <- which(headers %in% c("GWS_NAP", "GV_NAP"))
+      
+      openxlsx::addStyle(
+        wb,
+        sheet = "Results",
+        style = style_nap,
+        rows = 2:(nrow(df_export) + 1),
+        cols = nap_cols,
+        gridExpand = TRUE,
+        stack = TRUE
+      )
+      
+      # mm columns (1 decimal)
+      mm_cols <- grep("_mm$", headers)
+      
+      openxlsx::addStyle(
+        wb,
+        sheet = "Results",
+        style = style_mm,
+        rows = 2:(nrow(df_export) + 1),
+        cols = mm_cols,
+        gridExpand = TRUE,
+        stack = TRUE
+      )
+      
+      # Optional: make columns fit contents
+      openxlsx::setColWidths(
+        wb,
+        sheet = "Results",
+        cols = 1:ncol(df_export),
+        widths = "auto"
+      )
+      
+      # Make Date column a bit wider
+      openxlsx::setColWidths(
+        wb,
+        sheet = "Results",
+        cols = date_col,
+        widths = 14
+      )
+      
+      # Save workbook
+      openxlsx::saveWorkbook(
+        wb,
+        file = path,
+        overwrite = TRUE
+      )
     }
   )
   
